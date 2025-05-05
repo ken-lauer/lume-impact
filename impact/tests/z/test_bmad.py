@@ -8,6 +8,7 @@ from textwrap import dedent
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from impact.z.interfaces.bmad import export_particles
 from pmd_beamphysics import ParticleGroup, single_particle
 from pmd_beamphysics.units import mec2
 from pytao import SubprocessTao as Tao
@@ -100,7 +101,7 @@ def integrator_type(request: pytest.FixtureRequest) -> IntegratorType:
     return request.param
 
 
-def check_weighted_initial_particles(
+def assert_unweighted_particles_equal(
     expected: ParticleGroup, actual: ParticleGroup
 ) -> None:
     if len(expected) != 1:
@@ -112,6 +113,79 @@ def check_weighted_initial_particles(
     weighted_actual.weight = expected.weight
 
     assert weighted_actual == expected
+
+
+def log_particle_data_close(
+    request: pytest.FixtureRequest,
+    expected: ParticleGroup,
+    actual: ParticleGroup,
+    check_weight: bool = False,
+    atol=1e-8,
+    rtol=0.05,
+) -> None:
+    for key in (
+        "x",
+        "px",
+        "y",
+        "py",
+        "z",
+        "pz",
+        "t",
+        "status",
+    ):
+        if not np.allclose(
+            actual.data[key],
+            expected.data[key],
+            rtol=rtol,
+            atol=atol,
+        ):
+            with open("difference-log.txt", "at") as fp:
+                (exp,) = expected.data[key]
+                (act,) = actual.data[key]
+                delta = exp - act
+
+                print(
+                    f"{request.node.name},{key},{exp},{act},{delta},{100.0 * delta / act}%",
+                    file=fp,
+                )
+
+    if check_weight:
+        np.testing.assert_allclose(
+            desired=expected.data["weight"], actual=actual.data["weight"]
+        )
+    assert expected.data["species"] == actual.data["species"]
+
+
+def assert_particle_data_close(
+    expected: ParticleGroup,
+    actual: ParticleGroup,
+    check_weight: bool = False,
+    atol=1e-8,
+    rtol=0.05,
+) -> None:
+    for key in (
+        "x",
+        "px",
+        "y",
+        "py",
+        "z",
+        "pz",
+        "t",
+        "status",
+    ):
+        np.testing.assert_allclose(
+            desired=expected.data[key],
+            actual=actual.data[key],
+            err_msg=f"Particle data from key {key!r} is not close",
+            rtol=rtol,
+            atol=atol,
+        )
+
+    if check_weight:
+        np.testing.assert_allclose(
+            desired=expected.data["weight"], actual=actual.data["weight"]
+        )
+    assert expected.data["species"] == actual.data["species"]
 
 
 def compare_sxy(
@@ -166,6 +240,8 @@ def compare_sxy(
         y_tao = np.array(tao.bunch_comb("y"))
         s_tao = np.array(tao.bunch_comb("s"))
 
+        P1 = export_particles(tao, "END")
+
     input.space_charge_off()
 
     I = ImpactZ(input)
@@ -175,9 +251,9 @@ def compare_sxy(
     zP0 = output.particles["initial_particles"]
 
     # Check that Impact-Z wrote the same particles that we are using
-    check_weighted_initial_particles(expected=P0, actual=zP0)
+    assert_unweighted_particles_equal(expected=P0, actual=zP0)
 
-    # P1 = output.particles["final_particles"]
+    zP1 = output.particles["final_particles"]
 
     z = output.stats.z
     x = output.stats.mean_x
@@ -246,6 +322,12 @@ def compare_sxy(
         actual=y, desired=y_tao_interp, atol=atol, err_msg="Y differs"
     )
 
+    assert_unweighted_particles_equal(expected=P0, actual=zP0)
+
+    zP1 = output.particles["final_particles"]
+    log_particle_data_close(request, expected=P1, actual=zP1)
+    assert_particle_data_close(expected=P1, actual=zP1)
+
 
 @pytest.mark.parametrize(
     "lattice",
@@ -309,6 +391,9 @@ def test_compare_sxy_rotated(
     x_offset: float,
     y_offset: float,
 ) -> None:
+    if lattice.stem == "lcavity":
+        x_pitch /= 100.0
+        y_pitch /= 100.0
     compare_sxy(
         request=request,
         tmp_path=tmp_path,
@@ -373,7 +458,7 @@ def test_check_initial_particles(tmp_path: pathlib.Path) -> None:
         reference_kinetic_energy=I.input.reference_kinetic_energy,
         phase_reference=I.input.initial_phase_ref,
     )
-    check_weighted_initial_particles(expected=Pin, actual=P0)
+    assert_unweighted_particles_equal(expected=Pin, actual=P0)
     assert P0_written == Pin
 
 
