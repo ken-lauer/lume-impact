@@ -1,0 +1,294 @@
+"""Conversion of a live Tao lattice into an :class:`ImpactXInput`.
+
+Mirrors ``impact.z.interfaces.bmad`` but targets the ImpactX element API.  The
+converter reads live element parameters from a running :class:`pytao.Tao`
+instance (via ``ele_info``) and dispatches on the Bmad element key.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+from beamphysics import ParticleGroup
+from pytao import Tao, TaoCommandError
+from typing_extensions import Literal
+
+from ...interfaces.bmad import ele_info
+from ..input import (
+    AnyInputElement,
+    BeamMonitor,
+    CFbend,
+    DipEdge,
+    Drift,
+    ImpactXInput,
+    Marker,
+    Multipole,
+    Quad,
+    Sbend,
+    Sol,
+)
+
+# Reuse the generic (tool-agnostic) Tao helpers from the ImpactZ interface.
+from ...z.interfaces.bmad import export_particles, get_index_to_name
+
+logger = logging.getLogger(__name__)
+
+Which = Literal["model", "base", "design"]
+
+DRIFT_ELEMENT_KEYS = {
+    "drift",
+    "pipe",
+    "instrument",
+    "ecollimator",
+    "rcollimator",
+    "monitor",
+}
+# Bmad keys that carry no field and are represented as zero-length markers.
+MARKER_ELEMENT_KEYS = {"marker", "fork", "photon_fork", "beginning_ele"}
+
+# Multipole order by Bmad key (ImpactX Multipole ``multipole`` index: 2=quad, ...).
+MULTIPOLE_ORDER = {"sextupole": 3, "octupole": 4}
+
+
+class UnsupportedElementError(NotImplementedError):
+    """Raised when a Bmad element has no ImpactX representation yet."""
+
+
+def _f(info: dict, key: str, default: float = 0.0) -> float:
+    return float(info.get(key, default))
+
+
+def single_element_from_tao_info(
+    info: dict[str, Any],
+    *,
+    name: str = "",
+) -> list[AnyInputElement]:
+    """Convert one Tao element's info dict into ImpactX element model(s).
+
+    Returns a list because some Bmad elements expand into several ImpactX
+    elements (e.g. an ``sbend`` with pole-face rotations becomes
+    ``DipEdge, Sbend, DipEdge``).
+    """
+    key = str(info["key"]).lower()
+    length = _f(info, "L")
+    num_steps = int(info.get("NUM_STEPS", 1) or 1)
+    metadata = {"bmad_key": key}
+
+    common = dict(
+        name=name,
+        nslice=num_steps,
+        dx=_f(info, "X_OFFSET"),
+        dy=_f(info, "Y_OFFSET"),
+        rotation=-_f(info, "TILT"),
+        metadata=metadata,
+    )
+
+    if key in MARKER_ELEMENT_KEYS and length == 0.0:
+        return [Marker(name=name, metadata=metadata)]
+
+    if key in DRIFT_ELEMENT_KEYS:
+        return [Drift(ds=length, **common)]
+
+    if key == "quadrupole":
+        return [Quad(ds=length, k=_f(info, "K1"), **common)]
+
+    if key == "solenoid":
+        # ks = B_z / (B*rho); B*rho [T*m] = P0C[eV] / c.
+        p0c = _f(info, "P0C")
+        brho = p0c / 299792458.0 if p0c else 0.0
+        ks = _f(info, "BS_FIELD") / brho if brho else 0.0
+        return [Sol(ds=length, ks=ks, **common)]
+
+    if key == "sbend":
+        angle = _f(info, "ANGLE")
+        if angle == 0.0 or length == 0.0:
+            return [Drift(ds=length, **common)]
+        rc = length / angle
+        k1 = _f(info, "K1")
+        e1 = _f(info, "E1")
+        e2 = _f(info, "E2")
+        hgap = _f(info, "HGAP")
+        fint = _f(info, "FINT")
+        g = 2.0 * hgap
+        body_cls = CFbend if k1 != 0.0 else Sbend
+        body_kwargs = dict(ds=length, rc=rc, **common)
+        if k1 != 0.0:
+            body_kwargs["k"] = k1
+        body = body_cls(**body_kwargs)
+
+        elements: list[AnyInputElement] = [body]
+        if e1 != 0.0:
+            elements.insert(
+                0,
+                DipEdge(
+                    name=name,
+                    psi=e1,
+                    rc=rc,
+                    g=g,
+                    K2=fint,
+                    location="entry",
+                    metadata=metadata,
+                ),
+            )
+        if e2 != 0.0:
+            elements.append(
+                DipEdge(
+                    name=name,
+                    psi=e2,
+                    rc=rc,
+                    g=g,
+                    K2=fint,
+                    location="exit",
+                    metadata=metadata,
+                )
+            )
+        return elements
+
+    if key in MULTIPOLE_ORDER:
+        # ImpactX thin Multipole; integrated normal strength from the gradient.
+        order = MULTIPOLE_ORDER[key]
+        grad_key = {"sextupole": "B2_GRADIENT", "octupole": "B3_GRADIENT"}[key]
+        k_normal = _f(info, grad_key) * length
+        return [
+            Multipole(
+                name=name,
+                multipole=order,
+                K_normal=k_normal,
+                K_skew=0.0,
+                dx=_f(info, "X_OFFSET"),
+                dy=_f(info, "Y_OFFSET"),
+                rotation=-_f(info, "TILT"),
+                metadata=metadata,
+            )
+        ]
+
+    if length > 0.0:
+        raise UnsupportedElementError(f"{key!r} (length {length} m) is not supported")
+    # Unknown zero-length element -> harmless marker.
+    return [Marker(name=name, metadata=metadata)]
+
+
+def element_from_tao(
+    tao: Tao,
+    ele_id: str | int,
+    which: Which = "model",
+    name: str = "",
+) -> list[AnyInputElement]:
+    """Read one Tao element and convert it to ImpactX element model(s).
+
+    Elements Tao cannot describe as beamline elements (e.g. the ``beginning``
+    pseudo-element, which lacks a length) are silently skipped.
+    """
+    try:
+        info = ele_info(tao, ele_id, which=which)
+    except KeyError:
+        return []
+    return single_element_from_tao_info(info, name=name)
+
+
+@dataclass
+class ImpactXConversionState:
+    """Intermediate state extracted from a Tao lattice for conversion."""
+
+    idx_to_name: dict[int, str]
+    species: str
+    kin_energy_MeV: float
+    initial_particles: ParticleGroup | None
+    which: Which = "model"
+
+    @classmethod
+    def from_tao(
+        cls,
+        tao: Tao,
+        track_start: str | None = None,
+        track_end: str | None = None,
+        ix_uni: int = 1,
+        ix_branch: int = 0,
+        which: Which = "model",
+    ) -> "ImpactXConversionState":
+        idx_to_name = get_index_to_name(
+            tao,
+            track_start=track_start,
+            track_end=track_end,
+            ix_uni=ix_uni,
+            ix_branch=ix_branch,
+        )
+        ix_beginning = list(idx_to_name)[0]
+
+        branch1 = dict(tao.branch1(ix_uni, ix_branch))
+        species = str(branch1["param_particle"])
+
+        from beamphysics.species import mass_of
+
+        start_attrs = dict(tao.ele_gen_attribs(str(ix_beginning), which=which))
+        e_tot = float(start_attrs["E_TOT"])  # total energy [eV]
+        mass_eV = mass_of(species.lower())
+        kin_energy_MeV = (e_tot - mass_eV) / 1e6
+
+        try:
+            initial_particles = export_particles(tao, ix_beginning)
+        except TaoCommandError as ex:
+            logger.warning("No initial particles exported: %s", ex)
+            initial_particles = None
+
+        return cls(
+            idx_to_name=idx_to_name,
+            species=species.lower(),
+            kin_energy_MeV=kin_energy_MeV,
+            initial_particles=initial_particles,
+            which=which,
+        )
+
+    def convert_lattice(
+        self,
+        tao: Tao,
+        add_monitors: bool = True,
+    ) -> list[AnyInputElement]:
+        """Convert every in-range element into the ImpactX lattice."""
+        lattice: list[AnyInputElement] = []
+        if add_monitors:
+            lattice.append(BeamMonitor(name="initial"))
+        for ele_id, name in self.idx_to_name.items():
+            elements = element_from_tao(tao, ele_id, which=self.which, name=name)
+            lattice.extend(elements)
+            if add_monitors and any(getattr(e, "ds", 0.0) for e in elements):
+                lattice.append(BeamMonitor(name=name or f"ele_{ele_id}"))
+        return lattice
+
+    def to_input(self, lattice: list[AnyInputElement]) -> ImpactXInput:
+        return ImpactXInput(
+            lattice=lattice,
+            species=self.species,
+            kin_energy_MeV=self.kin_energy_MeV,
+            initial_particles=self.initial_particles,
+            bunch_charge_C=(
+                self.initial_particles.charge
+                if self.initial_particles is not None
+                else 0.0
+            ),
+        )
+
+
+def impactx_input_from_tao(
+    tao: Tao,
+    track_start: str | None = None,
+    track_end: str | None = None,
+    *,
+    ix_uni: int = 1,
+    ix_branch: int = 0,
+    which: Which = "model",
+    add_monitors: bool = True,
+) -> ImpactXInput:
+    """Create an :class:`ImpactXInput` from a live Tao lattice."""
+    state = ImpactXConversionState.from_tao(
+        tao,
+        track_start=track_start,
+        track_end=track_end,
+        ix_uni=ix_uni,
+        ix_branch=ix_branch,
+        which=which,
+    )
+    lattice = state.convert_lattice(tao, add_monitors=add_monitors)
+    return state.to_input(lattice)
