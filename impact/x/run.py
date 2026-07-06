@@ -84,8 +84,12 @@ def build_and_track(input: ImpactXInput, initial_particles: ParticleGroup | None
     from impactx import ImpactX as _ImpactXSim
 
     sim = _ImpactXSim()
+    # particle_shape must be set before init_grids for collective effects.
+    sim.particle_shape = input.particle_shape
     sim.space_charge = input.space_charge
     sim.csr = input.csr
+    if input.csr:
+        sim.csr_bins = input.csr_bins
     sim.slice_step_diagnostics = input.slice_step_diagnostics
     sim.init_grids()
 

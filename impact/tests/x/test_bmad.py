@@ -111,3 +111,73 @@ def test_compare_sxy(
     atol = 1e-4
     np.testing.assert_allclose(x, x_tao_interp, atol=atol, err_msg="X differs")
     np.testing.assert_allclose(y, y_tao_interp, atol=atol, err_msg="Y differs")
+
+
+# --- CSR ---------------------------------------------------------------------
+#
+# CSR is a collective effect, so the single-particle compare_sxy harness cannot
+# exercise it, and a cross-code (Bmad vs ImpactX) CSR benchmark is out of scope.
+# These tests verify that (1) from_tao propagates Bmad's global CSR flag, and
+# (2) ImpactX actually applies CSR on the converted lattice, producing the
+# expected energy-spread growth in a bend.
+
+# (lattice, whether Bmad enables the global CSR flag).  csr_zeuthen.bmad has
+# ``csr_and_space_charge_on`` commented out, so CSR is off there.
+csr_lattices = [("csr_bench.bmad", True), ("csr_zeuthen.bmad", False)]
+
+
+def _gaussian_bunch(kin_energy_MeV: float, n: int = 2000) -> ParticleGroup:
+    """A small Gaussian electron bunch at the given reference kinetic energy."""
+    rng = np.random.default_rng(0)
+    e_tot = kin_energy_MeV * 1e6 + mec2
+    pz0 = np.sqrt(e_tot**2 - mec2**2)
+    data = {
+        "x": rng.normal(0, 50e-6, n),
+        "y": rng.normal(0, 50e-6, n),
+        "z": rng.normal(0, 200e-6, n),
+        "px": rng.normal(0, 1e3, n),
+        "py": rng.normal(0, 1e3, n),
+        "pz": pz0 + rng.normal(0, 1e3, n),
+        "t": np.zeros(n),
+        "weight": np.full(n, 1e-9 / n),
+        "status": np.ones(n),
+        "species": "electron",
+    }
+    return ParticleGroup(data=data)
+
+
+@pytest.mark.parametrize(
+    ("lattice", "expected_csr"),
+    [pytest.param(name, csr, id=name) for name, csr in csr_lattices],
+)
+def test_csr_flag_from_tao(lattice: str, expected_csr: bool) -> None:
+    """Bmad ``csr_and_space_charge_on`` becomes ``ImpactXInput.csr``."""
+    with Tao(lattice_file=str(lattice_root / lattice), noplot=True) as tao:
+        input = ImpactXInput.from_tao(tao)
+    assert input.csr is expected_csr
+
+
+@pytest.mark.slow
+def test_csr_applied(tmp_path: pathlib.Path) -> None:
+    """ImpactX applies CSR on the converted lattice (collective sanity check).
+
+    A bend with CSR enabled must grow the beam energy spread far beyond the
+    CSR-off case; this confirms the flag/mesh plumbing rather than benchmarking
+    the CSR model against Bmad.
+    """
+    with Tao(lattice_file=str(lattice_root / "csr_bench.bmad"), noplot=True) as tao:
+        input = ImpactXInput.from_tao(tao)
+
+    input.initial_particles = _gaussian_bunch(input.kin_energy_MeV)
+    input.bunch_charge_C = input.initial_particles.charge
+    for ele in input.lattice:
+        if hasattr(ele, "nslice"):
+            ele.nslice = max(ele.nslice, 40)
+
+    input.csr = False
+    off = ImpactX(input, workdir=tmp_path).run()
+
+    input.csr = True
+    on = ImpactX(input, workdir=tmp_path).run()
+
+    assert on.stats["sigma_pt"][-1] > 10.0 * off.stats["sigma_pt"][-1]

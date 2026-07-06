@@ -340,6 +340,7 @@ class ImpactXConversionState:
     species: str
     kin_energy_MeV: float
     initial_particles: ParticleGroup | None
+    csr: bool = False
     which: Which = "model"
 
     @classmethod
@@ -377,11 +378,14 @@ class ImpactXConversionState:
             logger.warning("No initial particles exported: %s", ex)
             initial_particles = None
 
+        csr = bool(dict(tao.bmad_com()).get("csr_and_space_charge_on", False))
+
         return cls(
             idx_to_name=idx_to_name,
             species=species.lower(),
             kin_energy_MeV=kin_energy_MeV,
             initial_particles=initial_particles,
+            csr=csr,
             which=which,
         )
 
@@ -409,6 +413,7 @@ class ImpactXConversionState:
             species=self.species,
             kin_energy_MeV=self.kin_energy_MeV,
             initial_particles=self.initial_particles,
+            csr=self.csr,
             bunch_charge_C=(
                 self.initial_particles.charge
                 if self.initial_particles is not None

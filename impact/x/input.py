@@ -399,7 +399,12 @@ class ImpactXInput(BaseModel):
     space_charge : bool
         Enable the space-charge solver.
     csr : bool
-        Enable coherent synchrotron radiation.
+        Enable coherent synchrotron radiation (a collective effect applied in
+        bends).  Requires a multi-particle bunch and a transverse mesh.
+    csr_bins : int
+        Number of longitudinal bins for the CSR calculation.
+    particle_shape : int
+        B-spline deposition order (1, 2, or 3) used for collective effects.
     slice_step_diagnostics : bool
         Emit per-slice reduced-beam diagnostics (the per-``s`` stats table).
     """
@@ -417,6 +422,8 @@ class ImpactXInput(BaseModel):
 
     space_charge: bool = False
     csr: bool = False
+    csr_bins: int = 150
+    particle_shape: int = 2
     slice_step_diagnostics: bool = True
 
     def to_impactx_lattice(self) -> list:
