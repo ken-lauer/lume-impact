@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from beamphysics import ParticleGroup
+from beamphysics.particles import c_light
+from beamphysics.species import charge_state
 from pytao import Tao, TaoCommandError
 from typing_extensions import Literal
 
@@ -22,10 +24,12 @@ from ..input import (
     CFbend,
     DipEdge,
     Drift,
+    ExactMultipole,
     ImpactXInput,
+    Kicker,
     Marker,
-    Multipole,
     Quad,
+    RFCavity,
     Sbend,
     Sol,
 )
@@ -48,8 +52,21 @@ DRIFT_ELEMENT_KEYS = {
 # Bmad keys that carry no field and are represented as zero-length markers.
 MARKER_ELEMENT_KEYS = {"marker", "fork", "photon_fork", "beginning_ele"}
 
-# Multipole order by Bmad key (ImpactX Multipole ``multipole`` index: 2=quad, ...).
-MULTIPOLE_ORDER = {"sextupole": 3, "octupole": 4}
+# Native multipole elements -> (multipole index n, Bmad field-gradient key).
+# The index is the ExactMultipole ``k_normal`` list position: n=2 sextupole,
+# n=3 octupole (n=0 dipole, n=1 quadrupole).
+MULTIPOLE_GRADIENT = {
+    "sextupole": (2, "B2_GRADIENT"),
+    "octupole": (3, "B3_GRADIENT"),
+}
+
+
+def _normalized_strength(charge: float, p0c: float, gradient: float) -> float:
+    """Normalized multipole strength ``K_n`` [1/m^n] from a field gradient.
+
+    ``K_n = q * (c / P0C) * (d^n B / dx^n)`` (charge sign included).
+    """
+    return charge * (c_light / p0c) * gradient
 
 
 class UnsupportedElementError(NotImplementedError):
@@ -64,17 +81,32 @@ def single_element_from_tao_info(
     info: dict[str, Any],
     *,
     name: str = "",
+    species: str = "electron",
+    multipoles: list[dict[str, Any]] | None = None,
 ) -> list[AnyInputElement]:
     """Convert one Tao element's info dict into ImpactX element model(s).
 
     Returns a list because some Bmad elements expand into several ImpactX
     elements (e.g. an ``sbend`` with pole-face rotations becomes
-    ``DipEdge, Sbend, DipEdge``).
+    ``DipEdge, Sbend, DipEdge``, or a thick kicker becomes ``Drift, Kicker,
+    Drift``).
+
+    Parameters
+    ----------
+    info : dict
+        Element attributes from :func:`ele_info`.
+    name : str
+        Element name.
+    species : str
+        Reference species, used to sign normalized multipole strengths.
+    multipoles : list of dict, optional
+        ``ele_multipoles`` data for a ``thick_multipole`` element.
     """
     key = str(info["key"]).lower()
     length = _f(info, "L")
     num_steps = int(info.get("NUM_STEPS", 1) or 1)
     metadata = {"bmad_key": key}
+    charge = charge_state(species)
 
     common = dict(
         name=name,
@@ -94,11 +126,16 @@ def single_element_from_tao_info(
     if key == "quadrupole":
         return [Quad(ds=length, k=_f(info, "K1"), **common)]
 
+    if key in {"hkicker", "vkicker", "kicker"}:
+        return _kicker_from_info(info, key, length, common, metadata)
+
     if key == "solenoid":
-        # ks = B_z / (B*rho); B*rho [T*m] = P0C[eV] / c.
-        p0c = _f(info, "P0C")
-        brho = p0c / 299792458.0 if p0c else 0.0
-        ks = _f(info, "BS_FIELD") / brho if brho else 0.0
+        # ImpactX ks == Bmad normalized KS [1/m] (= q * B_z / P0C * c).
+        ks = _f(info, "KS")
+        if ks == 0.0:
+            p0c = _f(info, "P0C")
+            brho = p0c / c_light if p0c else 0.0
+            ks = charge * _f(info, "BS_FIELD") / brho if brho else 0.0
         return [Sol(ds=length, ks=ks, **common)]
 
     if key == "sbend":
@@ -146,23 +183,26 @@ def single_element_from_tao_info(
             )
         return elements
 
-    if key in MULTIPOLE_ORDER:
-        # ImpactX thin Multipole; integrated normal strength from the gradient.
-        order = MULTIPOLE_ORDER[key]
-        grad_key = {"sextupole": "B2_GRADIENT", "octupole": "B3_GRADIENT"}[key]
-        k_normal = _f(info, grad_key) * length
+    if key in MULTIPOLE_GRADIENT:
+        # Native sextupole/octupole -> thick ExactMultipole with a single order.
+        index, grad_key = MULTIPOLE_GRADIENT[key]
+        kn = _normalized_strength(charge, _f(info, "P0C"), _f(info, grad_key))
+        k_normal = [0.0] * (index + 1)
+        k_normal[index] = kn
         return [
-            Multipole(
-                name=name,
-                multipole=order,
-                K_normal=k_normal,
-                K_skew=0.0,
-                dx=_f(info, "X_OFFSET"),
-                dy=_f(info, "Y_OFFSET"),
-                rotation=-_f(info, "TILT"),
-                metadata=metadata,
+            ExactMultipole(
+                ds=length,
+                k_normal=k_normal,
+                k_skew=[0.0] * (index + 1),
+                **common,
             )
         ]
+
+    if key == "thick_multipole":
+        return [_thick_multipole_from_info(length, common, multipoles)]
+
+    if key == "lcavity":
+        return [_rfcavity_from_info(info, length, common, species)]
 
     if length > 0.0:
         raise UnsupportedElementError(f"{key!r} (length {length} m) is not supported")
@@ -170,11 +210,106 @@ def single_element_from_tao_info(
     return [Marker(name=name, metadata=metadata)]
 
 
+def _kicker_from_info(
+    info: dict[str, Any],
+    key: str,
+    length: float,
+    common: dict[str, Any],
+    metadata: dict[str, Any],
+) -> list[AnyInputElement]:
+    """Map a Bmad (h/v)kicker to a thin ImpactX Kicker, centered in a drift.
+
+    Bmad kicks (``KICK``/``HKICK``/``VKICK``) are dimensionless kick angles
+    ``dp/p0``, matching ImpactX's ``unit="dimensionless"``.
+    """
+    if key == "hkicker":
+        xkick, ykick = _f(info, "KICK"), 0.0
+    elif key == "vkicker":
+        xkick, ykick = 0.0, _f(info, "KICK")
+    else:
+        xkick, ykick = _f(info, "HKICK"), _f(info, "VKICK")
+
+    name = common["name"]
+    kicker = Kicker(
+        name=name,
+        xkick=xkick,
+        ykick=ykick,
+        dx=common["dx"],
+        dy=common["dy"],
+        rotation=common["rotation"],
+        metadata=metadata,
+    )
+    if length == 0.0:
+        return [kicker]
+    half = Drift(ds=length / 2.0, name=name, metadata=metadata)
+    return [half, kicker, half.model_copy()]
+
+
+def _thick_multipole_from_info(
+    length: float,
+    common: dict[str, Any],
+    multipoles: list[dict[str, Any]] | None,
+) -> ExactMultipole:
+    """Map a Bmad ``thick_multipole`` to an ImpactX ExactMultipole.
+
+    Uses Bmad's per-order ``KnL (equiv)`` integrated normalized strengths,
+    converting to the per-metre coefficients ImpactX expects.
+    """
+    multipoles = multipoles or []
+    max_index = max((int(m["index"]) for m in multipoles), default=0)
+    k_normal = [0.0] * (max_index + 1)
+    k_skew = [0.0] * (max_index + 1)
+    for m in multipoles:
+        n = int(m["index"])
+        knl = float(m.get("KnL (equiv)", 0.0))
+        bn = float(m.get("Bn", 0.0))
+        an = float(m.get("An", 0.0))
+        k_normal[n] = knl / length if length else 0.0
+        # Skew shares the normal's normalization; An/Bn carries the skew fraction.
+        if bn:
+            k_skew[n] = (knl * an / bn) / length if length else 0.0
+    return ExactMultipole(ds=length, k_normal=k_normal, k_skew=k_skew, **common)
+
+
+def _rfcavity_from_info(
+    info: dict[str, Any],
+    length: float,
+    common: dict[str, Any],
+    species: str,
+) -> RFCavity:
+    """Map a Bmad ``lcavity`` to an ImpactX RFCavity.
+
+    Approximate: ``escale`` is derived from the Bmad ``GRADIENT`` and a
+    single-harmonic on-axis profile is assumed.  Trajectory-level agreement
+    with Bmad requires a calibrated field map and phase-convention handling
+    (future work); ``from_tao`` produces a valid element so lattices with RF
+    cavities convert.
+    """
+    from beamphysics.species import mass_of
+
+    rest_energy_MeV = mass_of(species) / 1e6
+    gradient_MV_per_m = _f(info, "GRADIENT") / 1e6
+    escale = abs(gradient_MV_per_m) / rest_energy_MeV
+    return RFCavity(
+        name=common["name"],
+        ds=length,
+        escale=escale,
+        freq=_f(info, "RF_FREQUENCY"),
+        phase=_f(info, "PHI0") * 360.0,
+        nslice=common["nslice"],
+        dx=common["dx"],
+        dy=common["dy"],
+        rotation=common["rotation"],
+        metadata=common["metadata"],
+    )
+
+
 def element_from_tao(
     tao: Tao,
     ele_id: str | int,
     which: Which = "model",
     name: str = "",
+    species: str = "electron",
 ) -> list[AnyInputElement]:
     """Read one Tao element and convert it to ImpactX element model(s).
 
@@ -185,7 +320,16 @@ def element_from_tao(
         info = ele_info(tao, ele_id, which=which)
     except KeyError:
         return []
-    return single_element_from_tao_info(info, name=name)
+
+    multipoles = None
+    if str(info["key"]).lower() == "thick_multipole":
+        mp = tao.ele_multipoles(ele_id)
+        if mp.get("multipoles_on"):
+            multipoles = mp.get("data") or None
+
+    return single_element_from_tao_info(
+        info, name=name, species=species, multipoles=multipoles
+    )
 
 
 @dataclass
@@ -251,7 +395,9 @@ class ImpactXConversionState:
         if add_monitors:
             lattice.append(BeamMonitor(name="initial"))
         for ele_id, name in self.idx_to_name.items():
-            elements = element_from_tao(tao, ele_id, which=self.which, name=name)
+            elements = element_from_tao(
+                tao, ele_id, which=self.which, name=name, species=self.species
+            )
             lattice.extend(elements)
             if add_monitors and any(getattr(e, "ds", 0.0) for e in elements):
                 lattice.append(BeamMonitor(name=name or f"ele_{ele_id}"))

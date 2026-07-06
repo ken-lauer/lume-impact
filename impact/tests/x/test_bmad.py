@@ -13,15 +13,12 @@ from .conftest import bmad_files
 
 lattice_root = bmad_files
 
-# Bmad element types with no ImpactX mapping yet (from_tao raises for these).
+# Bmad element types with no ImpactX mapping (from_tao raises for these).
+# `wiggler` has no ImpactX element; `elements.bmad` contains an `e_gun`.
 _unsupported = pytest.mark.xfail(reason="Element type not yet supported", strict=False)
 lattice_markers = {
     "elements.bmad": _unsupported,
-    "lcavity.bmad": _unsupported,
-    "lcavity_rf.bmad": _unsupported,
     "wiggler.bmad": _unsupported,
-    "decapole.bmad": _unsupported,
-    "kickers.bmad": _unsupported,
 }
 
 lattices = pytest.mark.parametrize(
@@ -40,9 +37,13 @@ comparison_lattices: dict[str, list] = {
     "dipole.bmad": [],
     "sextupole.bmad": [],
     "octupole.bmad": [],
-    "solenoid.bmad": [
-        pytest.mark.xfail(reason="Solenoid x-y coupling mismatch (ks scaling)")
-    ],
+    "decapole.bmad": [],
+    "solenoid.bmad": [],
+    "kickers.bmad": [],
+    # lcavity/lcavity_rf convert (see test_from_tao) but are omitted here: a
+    # transverse single-particle orbit is insensitive to the longitudinal RF
+    # field, so compare_sxy cannot validate RF physics.  Calibrating the RF
+    # field profile and adding a longitudinal (energy) check is future work.
 }
 
 

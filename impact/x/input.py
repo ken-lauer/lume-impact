@@ -217,6 +217,93 @@ class Multipole(InputElement, impactx_class="Multipole"):
     rotation: float = 0.0
 
 
+class ExactMultipole(_Aligned, impactx_class="ExactMultipole"):
+    """A thick multipole using the exact nonlinear Hamiltonian.
+
+    Attributes
+    ----------
+    ds : float
+        Segment length [m].
+    k_normal : list of float
+        Normal multipole coefficients indexed by order ``n`` (``k_normal[n]``),
+        where ``n=0`` is dipole, ``1`` quadrupole, ``2`` sextupole, ....  Units
+        are ``1/m^n`` when ``unit=0``.
+    k_skew : list of float
+        Skew multipole coefficients, same indexing.
+    unit : int
+        ``0`` for normalized ``1/m^n`` strengths (default), ``1`` for ``T/m^(n-1)``.
+    int_order : int
+        Symplectic integration order (2, 4, or 6).
+    mapsteps : int
+        Integration steps per slice.
+    """
+
+    type: Literal["ExactMultipole"] = "ExactMultipole"
+    ds: float = 0.0
+    k_normal: list[float] = pydantic.Field(default_factory=list)
+    k_skew: list[float] = pydantic.Field(default_factory=list)
+    unit: int = 0
+    int_order: int = 2
+    mapsteps: int = 5
+
+
+class RFCavity(_Aligned, impactx_class="RFCavity"):
+    """An RF cavity with an on-axis field given by a Fourier expansion.
+
+    Attributes
+    ----------
+    ds : float
+        Segment length [m].
+    escale : float
+        On-axis field scaling [1/m] = (peak on-axis Ez in MV/m) / (rest energy in MeV).
+    freq : float
+        RF frequency [Hz].
+    phase : float
+        RF phase [degrees].
+    cos_coefficients, sin_coefficients : list of float
+        Fourier coefficients of the normalized on-axis longitudinal field Ez(z).
+    mapsteps : int
+        Integration steps per slice for the reference-orbit ODE.
+
+    Notes
+    -----
+    The Bmad-to-ImpactX mapping of ``lcavity`` elements currently uses a
+    single-harmonic placeholder field profile; trajectory-level agreement with
+    Bmad requires a calibrated on-axis field map (future work).
+    """
+
+    type: Literal["RFCavity"] = "RFCavity"
+    ds: float = 0.0
+    escale: float = 0.0
+    freq: float = 0.0
+    phase: float = 0.0
+    cos_coefficients: list[float] = pydantic.Field(default_factory=lambda: [1.0])
+    sin_coefficients: list[float] = pydantic.Field(default_factory=lambda: [0.0])
+    mapsteps: int = 10
+
+
+class Kicker(InputElement, impactx_class="Kicker"):
+    """A thin transverse kicker.
+
+    Attributes
+    ----------
+    xkick, ykick : float
+        Horizontal/vertical kick.  For ``unit="dimensionless"`` these are in
+        units of the reference rigidity (i.e. the kick angle ``dpx/p0``); for
+        ``unit="T-m"`` they are integrated fields.
+    unit : str
+        ``"dimensionless"`` (default) or ``"T-m"``.
+    """
+
+    type: Literal["Kicker"] = "Kicker"
+    xkick: float = 0.0
+    ykick: float = 0.0
+    unit: Literal["dimensionless", "T-m"] = "dimensionless"
+    dx: float = 0.0
+    dy: float = 0.0
+    rotation: float = 0.0
+
+
 class Aperture(InputElement, impactx_class="Aperture"):
     """A thin collimating aperture."""
 
@@ -276,6 +363,9 @@ AnyInputElement: TypeAlias = Union[
     Sol,
     DipEdge,
     Multipole,
+    ExactMultipole,
+    RFCavity,
+    Kicker,
     Aperture,
     Marker,
     BeamMonitor,
