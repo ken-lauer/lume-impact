@@ -117,15 +117,15 @@ def _load_monitor_particle_groups(workdir: pathlib.Path) -> dict[str, ParticleGr
     """Read beam monitors, one ParticleGroup per (monitor, iteration).
 
     ImpactX writes particles in its own fixed-``s`` frame with reference-normalized
-    momenta, which beamphysics cannot interpret directly.  Reading these back into
-    lab-frame :class:`ParticleGroup` objects requires the inverse coordinate
-    transform (not yet implemented); until then, monitors that cannot be parsed
-    are skipped.  The per-``s`` ``stats`` table remains the primary output.
+    momenta; :func:`impactx_monitor_to_particle_group` inverts this back to the
+    lab-frame representation beamphysics uses.
     """
     import warnings
 
     import h5py
     from beamphysics.readers import particle_paths
+
+    from .particles import impactx_monitor_to_particle_group
 
     diag_dir = workdir / "diags" / "openPMD"
     result: dict[str, ParticleGroup] = {}
@@ -143,12 +143,12 @@ def _load_monitor_particle_groups(workdir: pathlib.Path) -> dict[str, ParticleGr
                 for species in fp[path]:
                     key = f"{h5path.stem}@{iteration}"
                     try:
-                        result[key] = ParticleGroup(h5=fp[path][species])
+                        result[key] = impactx_monitor_to_particle_group(
+                            fp[path][species]
+                        )
                     except Exception as ex:  # noqa: BLE001
                         warnings.warn(
-                            f"Could not read monitor {key} from {h5path.name}: {ex}. "
-                            "ImpactX-frame particle read-back is not yet implemented; "
-                            "use the reduced-beam stats table instead.",
+                            f"Could not read monitor {key} from {h5path.name}: {ex}",
                             stacklevel=2,
                         )
     return result
