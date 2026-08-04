@@ -8,6 +8,7 @@ instance (via ``ele_info``) and dispatches on the Bmad element key.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,11 @@ MULTIPOLE_GRADIENT = {
     "sextupole": (2, "B2_GRADIENT"),
     "octupole": (3, "B3_GRADIENT"),
 }
+
+# Number of hard-edge slices per wiggler/undulator period.  Each slice is a
+# thin horizontal kick about a straight reference; the trajectory converges to
+# Bmad's with increasing resolution (~0.4% of orbit amplitude at 20).
+WIGGLER_SLICES_PER_PERIOD = 20
 
 
 def _normalized_strength(charge: float, p0c: float, gradient: float) -> float:
@@ -204,6 +210,9 @@ def single_element_from_tao_info(
     if key == "lcavity":
         return [_rfcavity_from_info(info, length, common, species)]
 
+    if key == "wiggler":
+        return _wiggler_from_info(info, length, name, metadata)
+
     if length > 0.0:
         raise UnsupportedElementError(f"{key!r} (length {length} m) is not supported")
     # Unknown zero-length element -> harmless marker.
@@ -302,6 +311,43 @@ def _rfcavity_from_info(
         rotation=common["rotation"],
         metadata=common["metadata"],
     )
+
+
+def _wiggler_from_info(
+    info: dict[str, Any],
+    length: float,
+    name: str,
+    metadata: dict[str, Any],
+) -> list[AnyInputElement]:
+    """Model a planar wiggler/undulator as a series of hard-edge kicks.
+
+    ImpactX has no wiggler element, so the periodic vertical field
+    ``B_y(s) = B_max * cos(k_u s)`` is represented as thin horizontal
+    :class:`Kicker` slices about a straight reference (each with the slice's
+    integrated bend angle ``g(s) ds``), bracketed by half drifts.  This keeps the
+    design orbit straight -- matching Bmad -- while reproducing the oscillating
+    trajectory; it converges to Bmad's orbit as the slice count increases.
+    """
+    l_period = _f(info, "L_PERIOD")
+    n_period = int(_f(info, "N_PERIOD"))
+    g_max = _f(info, "G_MAX")  # max curvature 1/m = B_max / (P0C/c), reference-signed
+    polarity = _f(info, "POLARITY", 1.0)
+    if l_period <= 0.0 or n_period <= 0 or g_max == 0.0:
+        return [Drift(ds=length, name=name, metadata=metadata)]
+
+    ku = 2.0 * math.pi / l_period
+    n_slices = n_period * WIGGLER_SLICES_PER_PERIOD
+    ds = length / n_slices
+    elements: list[AnyInputElement] = []
+    for i in range(n_slices):
+        s_center = (i + 0.5) * ds
+        xkick = polarity * g_max * math.cos(ku * s_center) * ds
+        elements += [
+            Drift(ds=ds / 2.0, name=name, metadata=metadata),
+            Kicker(xkick=xkick, ykick=0.0, name=name, metadata=metadata),
+            Drift(ds=ds / 2.0, name=name, metadata=metadata),
+        ]
+    return elements
 
 
 def element_from_tao(

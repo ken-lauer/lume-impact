@@ -181,6 +181,18 @@ def particle_group_to_impactx(
     """
     mc2 = P.mass  # rest energy [eV]; P.px/mc2 == (beta gamma)_x
 
+    # Normalize to a common-time snapshot: the fixed-s -> fixed-s ImpactX transform
+    # below (`_to_s_from_t`) expects a fixed-t bunch (spread in z), whereas an
+    # accelerator bunch (e.g. exported from Tao) is at fixed s (spread in t,
+    # z ~ 0).  drift_to_t drifts every particle to the mean time so the
+    # longitudinal extent lives in z, as the transform requires.  It is a no-op
+    # for a bunch already at common time.  (A tolerance test on t is unreliable:
+    # absolute times ~1e-13 s look "equal" to np.allclose while carrying the full
+    # bunch length.)
+    if len(P) > 1:
+        P = P.copy()
+        P.drift_to_t()
+
     x = np.asarray(P.x, dtype=float)
     y = np.asarray(P.y, dtype=float)
     z = np.asarray(P.z, dtype=float)
