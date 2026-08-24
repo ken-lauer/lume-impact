@@ -55,6 +55,102 @@ def _save_trajectory_comparison(
     plt.close(fig)
 
 
+def _chirp_phase(P: ParticleGroup) -> float:
+    """
+    Longitudinal chirp as an angle [rad] from the ``z``-``delta`` correlation.
+    """
+    z = np.asarray(P["z"], dtype=float) - P["mean_z"]
+    delta = (np.asarray(P["p"], dtype=float) - P["mean_p"]) / P["mean_p"]
+    zz = float(np.mean(z * z))
+    return float(np.arctan2(np.mean(z * delta), zz)) if zz > 0 else 0.0
+
+
+def pplot(
+    P: ParticleGroup,
+    xkey: str,
+    ykey: str,
+    text: str | None = None,
+    title: str | None = None,
+    **kwargs,
+):
+    """
+    Plot ParticleGroup phase space with standardized beam-statistics annotations.
+
+    A thin wrapper around :meth:`ParticleGroup.plot` that annotates common
+    projections (longitudinal phase space, transverse spot, x-xp, y-yp) with the
+    relevant beam statistics.  Returns the figure when ``return_figure=True``.
+    """
+    from matplotlib.gridspec import GridSpec
+
+    return_figure = kwargs.get("return_figure", False)
+    kwargs["return_figure"] = True
+    fig = P.plot(xkey, ykey, **kwargs)
+
+    if text is None:
+        auto_text = None
+        if xkey in ("delta_z/c", "z/c") and ykey == "energy":
+            sigma_z = P["sigma_z"]
+            sigma_p = P["sigma_p"]
+            p0 = P["mean_p"]
+            auto_text = (
+                rf"$\sigma_z/c$= {sigma_z / c_light * 1e15:.0f} fs"
+                "\n"
+                rf"$\sigma_\delta$= {sigma_p / p0 * 1e4:.1f}$\times10^{{-4}}$"
+                "\n"
+                rf"chirp= ${_chirp_phase(P) * 180 / np.pi:.1f}^\circ$"
+                "\n"
+                rf"$\left<E\right>$= {P['mean_energy'] / 1e6:.1f} MeV"
+            )
+        elif xkey == "x" and ykey == "y":
+            auto_text = (
+                rf"$\sigma_x$= {P['sigma_x'] * 1e6:.1f} µm"
+                "\n"
+                rf"$\sigma_y$= {P['sigma_y'] * 1e6:.1f} µm"
+            )
+        elif xkey == "x" and ykey in ("xp", "px"):
+            auto_text = r"$\epsilon_{n,x}$" + f"\n{P['norm_emit_x'] * 1e6:.2f} mm-mrad"
+        elif xkey == "y" and ykey in ("yp", "py"):
+            auto_text = r"$\epsilon_{n,y}$" + f"\n{P['norm_emit_y'] * 1e6:.2f} mm-mrad"
+        text = auto_text
+
+    if text:
+        gs = GridSpec(4, 4, figure=fig)
+        ax_text = fig.add_subplot(gs[0, -1])
+        ax_text.axis("off")
+        ax_text.text(0.5, 0.5, text, fontsize=10, ha="center", va="center")
+    if title and fig and len(fig.axes) > 1:
+        fig.axes[1].set_title(title)
+    return fig if return_figure else None
+
+
+# Standard phase-space views (xkey, ykey, title, extra kwargs).
+PHASE_SPACE_VIEWS = (
+    ("delta_z/c", "energy", "Longitudinal phase space", {}),
+    ("x", "y", "Transverse spot", {}),
+    ("x", "xp", "Horizontal phase space", {"ellipse": True}),
+    ("y", "yp", "Vertical phase space", {"ellipse": True}),
+)
+
+
+def _save_phase_space_views(name: str, P: ParticleGroup) -> None:
+    """Save the standard pplot phase-space views of a bunch to ``artifacts/``.
+
+    The bunch is drifted to a common time so its longitudinal extent lives in
+    ``z`` (fixed-s bunches store it in ``t``, leaving ``delta_z/c`` degenerate).
+    """
+    P = P.copy()
+    P.drift_to_t()
+    test_artifacts.mkdir(parents=True, exist_ok=True)
+    for xkey, ykey, title, kw in PHASE_SPACE_VIEWS:
+        try:
+            fig = pplot(P, xkey, ykey, title=title, return_figure=True, **kw)
+        except Exception:
+            continue
+        tag = f"{xkey}_{ykey}".replace("/", "")
+        fig.savefig(test_artifacts / f"{name}_{tag}.png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
+
 def _save_bunch_comparison(
     name: str,
     groups: dict[str, ParticleGroup],
@@ -294,6 +390,8 @@ def _track_tao_bunch(
         ]
         if csr:
             cmds += [
+                "set bmad_com csr_and_space_charge_on = T",
+                "set ele sbend::* csr_method = 1_dim",
                 f"set space_charge_com n_bin = {n_bin}",
                 f"set space_charge_com ds_track_step = {ds_step}",
             ]
@@ -317,20 +415,37 @@ def test_csr_flag_from_tao(lattice: str, expected_csr: bool) -> None:
     assert input.csr is expected_csr
 
 
+# CSR is physical only in bends (straight elements emit none), and only a
+# suitable energy/charge regime is a meaningful cross-code benchmark: a generic
+# low-energy dipole (e.g. dipole.bmad at 10 MeV) drives CSR nonperturbative,
+# where Bmad's 1D CSR and ImpactX's models legitimately diverge.  These are the
+# designed high-energy CSR benchmarks (single bend; 5 GeV chicane).
+csr_bend_lattices = ["csr_bench.bmad", "csr_zeuthen.bmad"]
+
+
 @pytest.mark.slow
-def test_csr_cross_code(request: pytest.FixtureRequest, tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize("lattice", csr_bend_lattices)
+def test_csr_cross_code(
+    request: pytest.FixtureRequest, tmp_path: pathlib.Path, lattice: str
+) -> None:
     """
     Compare output-bunch statistics through a CSR bend: Bmad/Tao vs ImpactX.
 
     The same bunch is tracked with CSR enabled in both codes; the final beam
-    sizes and normalized emittances are compared.  Agreement to a few percent
-    validates that ImpactX's CSR reproduces Bmad's 1D CSR on this benchmark.
+    sizes and normalized emittances are compared, and phase-space figures for
+    both bunches are written to ``artifacts/``.  Agreement to a few percent
+    validates that ImpactX's CSR reproduces Bmad's 1D CSR.
+
+    Statistics use ImpactX's authoritative reduced-beam diagnostics; the monitor
+    read-back (used only for the plots) scales momentum-spread quantities by
+    cos(bend angle), a known BeamMonitor-output artifact.
     """
-    kin = 1000.0
+    latt = lattice_root / lattice
+    with Tao(lattice_file=str(latt), noplot=True) as tao:
+        kin = ImpactXInput.from_tao(tao).kin_energy_MeV
     P = _gaussian_bunch(kin, CSR_N_PARTICLES)
-    P_final_tao, input = _track_tao_bunch(
-        lattice_root / "csr_bench.bmad", P, tmp_path, csr=True
-    )
+
+    P_final_tao, input = _track_tao_bunch(latt, P, tmp_path, csr=True)
     assert input.csr is True
 
     for ele in input.lattice:
@@ -338,8 +453,6 @@ def test_csr_cross_code(request: pytest.FixtureRequest, tmp_path: pathlib.Path) 
             ele.nslice = max(ele.nslice, 40)
     output = ImpactX(input, workdir=tmp_path).run()
 
-    # ImpactX reduced-beam stats are authoritative (avoid the read-back frame
-    # artifact); compare against the Tao final bunch.
     s = output.stats
     comparisons = {
         "sigma_x": (P_final_tao["sigma_x"], s["sigma_x"][-1]),
@@ -348,13 +461,14 @@ def test_csr_cross_code(request: pytest.FixtureRequest, tmp_path: pathlib.Path) 
         "norm_emit_y": (P_final_tao["norm_emit_y"], s["emittance_yn"][-1]),
     }
 
+    name = request.node.name.replace("/", "_")
     key = max(output.particles, key=lambda k: int(k.split("@")[1]))
-    _save_bunch_comparison(
-        request.node.name.replace("/", "_"),
-        {"Bmad": P_final_tao, "ImpactX": output.particles[key]},
-    )
+    P_final_ix = output.particles[key]
+    _save_bunch_comparison(name, {"Bmad": P_final_tao, "ImpactX": P_final_ix})
+    _save_phase_space_views(f"{name}_bmad", P_final_tao)
+    _save_phase_space_views(f"{name}_impactx", P_final_ix)
 
-    for name, (tao_val, ix_val) in comparisons.items():
+    for stat, (tao_val, ix_val) in comparisons.items():
         assert tao_val == pytest.approx(
             ix_val, rel=0.05
-        ), f"{name}: Tao={tao_val:.5g} ImpactX={ix_val:.5g}"
+        ), f"{stat}: Tao={tao_val:.5g} ImpactX={ix_val:.5g}"

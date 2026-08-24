@@ -68,41 +68,6 @@ def _to_s_from_t(ref, dx, dy, dz, dpx, dpy, dpz):
     return dxs, dys, dt, dpx, dpy, dpt
 
 
-def _to_t_from_s(ref, dx, dy, dt, dpx, dpy, dpt):
-    """Fixed-s deviations ``(x, y, t, px, py, pt)`` -> fixed-t deviations."""
-    ref_pz = ref.pz
-    ref_pt = ref.pt
-    denom = ref_pt + ref_pz * dpt
-    dxt = dx + ref_pz * dpx * dt / denom
-    dyt = dy + ref_pz * dpy * dt / denom
-    pz = np.sqrt(
-        -1.0 + (ref_pt + ref_pz * dpt) ** 2 - (ref_pz * dpx) ** 2 - (ref_pz * dpy) ** 2
-    )
-    dz = dt * pz / denom
-    dpz = (pz - ref_pz) / ref_pz
-    return dxt, dyt, dz, dpx, dpy, dpz
-
-
-def _to_global_t(ref, dx, dy, dz, dpx, dpy, dpz):
-    """Reference-frame deviations (fixed t) -> lab-frame arrays (momenta in mc)."""
-    x = dx + ref.x
-    y = dy + ref.y
-    z = dz + ref.z
-    px = ref.px + ref.pz * dpx
-    py = ref.py + ref.pz * dpy
-    pz = ref.pz + ref.pz * dpz
-    return x, y, z, px, py, pz
-
-
-class _RefPart:
-    """Minimal stand-in for an ImpactX reference particle in coordinate maths."""
-
-    def __init__(self, pz: float, pt: float, x=0.0, y=0.0, z=0.0, px=0.0, py=0.0):
-        self.x, self.y, self.z = x, y, z
-        self.px, self.py, self.pz = px, py, pz
-        self.pt = pt
-
-
 def _species_from_mass_charge(mass_kg: float, charge_C: float) -> str:
     """Best-effort particle species from reference mass [kg] and charge [C]."""
     m_p = 1.67262192369e-27
@@ -115,9 +80,12 @@ def _species_from_mass_charge(mass_kg: float, charge_C: float) -> str:
 def impactx_monitor_to_particle_group(group) -> ParticleGroup:
     """Convert an ImpactX openPMD ``beam`` group to a lab-frame ParticleGroup.
 
-    Inverts the fixed-``s``, reference-normalized ImpactX phase space back to the
-    lab-frame ``(x, y, z, px, py, pz)`` [eV/c] representation used by beamphysics.
-    The reference particle is reconstructed from the group's ``*_ref`` attributes.
+    ImpactX stores fixed-``s`` phase space relative to the reference particle:
+    ``x, y`` [m], ``t = c*dt`` [m], and momenta ``px, py = p_{x,y}/p0`` and
+    ``pt = -d(gamma)/(beta0 gamma0)`` normalized by the reference momentum.  Since
+    ImpactX's transverse coordinates coincide with Bmad's, the phase space maps
+    directly onto Bmad coordinates and :meth:`ParticleGroup.from_bmad` performs
+    the lab-frame reconstruction (avoiding a hand-rolled frame transform).
 
     Parameters
     ----------
@@ -125,39 +93,45 @@ def impactx_monitor_to_particle_group(group) -> ParticleGroup:
         The ``.../particles/beam`` group written by an ImpactX ``BeamMonitor``.
     """
     attrs = group.attrs
-    ref = _RefPart(pz=float(attrs["pz_ref"]), pt=float(attrs["pt_ref"]))
+    beta0_gamma0 = float(attrs["pz_ref"])  # reference beta*gamma
+    gamma0 = np.hypot(1.0, beta0_gamma0)
     mass_kg = float(attrs["mass_ref"])
     charge_ref_C = float(attrs["charge_ref"])
     mc2_eV = mass_kg * c_light**2 / Q_E
+    p0c = beta0_gamma0 * mc2_eV  # reference momentum * c [eV]
     species = _species_from_mass_charge(mass_kg, charge_ref_C)
 
     pos, mom = group["position"], group["momentum"]
-    dx = np.asarray(pos["x"], dtype=float) * pos["x"].attrs.get("unitSI", 1.0)
-    dy = np.asarray(pos["y"], dtype=float) * pos["y"].attrs.get("unitSI", 1.0)
-    dt = np.asarray(pos["t"], dtype=float) * pos["t"].attrs.get("unitSI", 1.0)
-    dpx = np.asarray(mom["x"], dtype=float)
-    dpy = np.asarray(mom["y"], dtype=float)
-    dpt = np.asarray(mom["t"], dtype=float)
+    x = np.asarray(pos["x"], dtype=float)
+    y = np.asarray(pos["y"], dtype=float)
+    ct = np.asarray(pos["t"], dtype=float)  # c * (t - t_ref)
+    px = np.asarray(mom["x"], dtype=float)  # = px / p0  == Bmad px
+    py = np.asarray(mom["y"], dtype=float)
+    pt = np.asarray(mom["t"], dtype=float)  # = -d(gamma)/(beta0 gamma0)
 
-    dxt, dyt, dz, dpx, dpy, dpz = _to_t_from_s(ref, dx, dy, dt, dpx, dpy, dpt)
-    x, y, z, px, py, pz = _to_global_t(ref, dxt, dyt, dz, dpx, dpy, dpz)
+    # ImpactX pt -> gamma -> Bmad pz = p/p0 - 1
+    gamma = gamma0 - pt * beta0_gamma0
+    beta_gamma = np.sqrt(np.clip(gamma**2 - 1.0, 0.0, None))
+    pz_bmad = beta_gamma / beta0_gamma0 - 1.0
+    beta = beta_gamma / gamma
+    # Bmad z = -beta * c * dt = -beta * (c*dt)
+    z_bmad = -beta * ct
 
-    # momenta from beta*gamma back to eV/c; time-of-flight from c*t.
     weighting = np.asarray(group["weighting"], dtype=float)
-    n = len(x)
-    data = {
+    bmad = {
         "x": x,
+        "px": px,
         "y": y,
-        "z": z,
-        "px": px * mc2_eV,
-        "py": py * mc2_eV,
-        "pz": pz * mc2_eV,
-        "t": np.zeros(n),
-        "weight": weighting * abs(charge_ref_C),
-        "status": np.ones(n, dtype=int),
+        "py": py,
+        "z": z_bmad,
+        "pz": pz_bmad,
+        "p0c": p0c,
+        "tref": 0.0,
         "species": species,
+        "charge": weighting * abs(charge_ref_C),
+        "state": np.ones(len(x), dtype=int),
     }
-    return ParticleGroup(data=data)
+    return ParticleGroup.from_bmad(bmad)
 
 
 def particle_group_to_impactx(
