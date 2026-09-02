@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, ClassVar, Union
 
 import pydantic
+from impactx import elements
 from typing_extensions import Literal, TypeAlias
 
 from .constants import ApertureAction, ApertureShape, OpenPMDBackend
@@ -23,8 +24,10 @@ input_element_by_class: dict[str, type["InputElement"]] = {}
 class InputElement(BaseModel):
     """Base class for all ImpactX lattice element models.
 
-    Subclasses declare the name of the ImpactX element class they mirror via the
-    ``impactx_class`` keyword argument, e.g. ``class Drift(..., impactx_class="Drift")``.
+    Subclasses declare the ``impactx.elements`` class they mirror via the
+    ``impactx_class`` keyword argument, e.g.
+    ``class Drift(..., impactx_class=elements.Drift)``.  Subclasses without it
+    (e.g. mixins) are not registered.
 
     Attributes
     ----------
@@ -36,15 +39,18 @@ class InputElement(BaseModel):
         created via :meth:`ImpactXInput.from_tao`).
     """
 
-    _impactx_class_: ClassVar[str]
+    _impactx_class_: ClassVar[type]
 
     name: str = ""
     metadata: dict[str, int | float | str | bool] = {}
 
-    def __init_subclass__(cls, impactx_class: str, **kwargs: Any) -> None:
+    def __init_subclass__(
+        cls, impactx_class: type | None = None, **kwargs: Any
+    ) -> None:
         super().__init_subclass__(**kwargs)
-        cls._impactx_class_ = impactx_class
-        input_element_by_class[impactx_class] = cls
+        if impactx_class is not None:
+            cls._impactx_class_ = impactx_class
+            input_element_by_class[impactx_class.__name__] = cls
 
     def _impactx_kwargs(self) -> dict[str, Any]:
         """Keyword arguments forwarded to the ImpactX element constructor.
@@ -63,13 +69,10 @@ class InputElement(BaseModel):
 
     def to_impactx(self):
         """Instantiate and return the live ``impactx.elements`` object."""
-        from impactx import elements
-
-        cls = getattr(elements, self._impactx_class_)
-        return cls(**self._impactx_kwargs())
+        return self._impactx_class_(**self._impactx_kwargs())
 
 
-class _Aligned(InputElement, impactx_class="_Aligned"):
+class _Aligned(InputElement):
     """Mixin fields shared by thick, alignable elements."""
 
     dx: float = 0.0
@@ -80,11 +83,7 @@ class _Aligned(InputElement, impactx_class="_Aligned"):
     nslice: int = 1
 
 
-# Remove the helper mixin from the registry -- it is not a real element.
-input_element_by_class.pop("_Aligned", None)
-
-
-class Drift(_Aligned, impactx_class="Drift"):
+class Drift(_Aligned, impactx_class=elements.Drift):
     """A drift.
 
     Attributes
@@ -99,7 +98,7 @@ class Drift(_Aligned, impactx_class="Drift"):
     ds: float = 0.0
 
 
-class Quad(_Aligned, impactx_class="Quad"):
+class Quad(_Aligned, impactx_class=elements.Quad):
     """A hard-edged, ideal quadrupole.
 
     Attributes
@@ -116,7 +115,7 @@ class Quad(_Aligned, impactx_class="Quad"):
     k: float = 0.0
 
 
-class Sbend(_Aligned, impactx_class="Sbend"):
+class Sbend(_Aligned, impactx_class=elements.Sbend):
     """An ideal sector bend.
 
     Attributes
@@ -132,7 +131,7 @@ class Sbend(_Aligned, impactx_class="Sbend"):
     rc: float = 0.0
 
 
-class CFbend(_Aligned, impactx_class="CFbend"):
+class CFbend(_Aligned, impactx_class=elements.CFbend):
     """An ideal combined-function (dipole + quadrupole) sector bend.
 
     Attributes
@@ -151,7 +150,7 @@ class CFbend(_Aligned, impactx_class="CFbend"):
     k: float = 0.0
 
 
-class Sol(_Aligned, impactx_class="Sol"):
+class Sol(_Aligned, impactx_class=elements.Sol):
     """An ideal hard-edge solenoid.
 
     Attributes
@@ -167,7 +166,7 @@ class Sol(_Aligned, impactx_class="Sol"):
     ks: float = 0.0
 
 
-class DipEdge(InputElement, impactx_class="DipEdge"):
+class DipEdge(InputElement, impactx_class=elements.DipEdge):
     """A dipole hard-edge fringe-field map.
 
     Attributes
@@ -195,7 +194,7 @@ class DipEdge(InputElement, impactx_class="DipEdge"):
     rotation: float = 0.0
 
 
-class Multipole(InputElement, impactx_class="Multipole"):
+class Multipole(InputElement, impactx_class=elements.Multipole):
     """A thin multipole kick of a single order.
 
     Attributes
@@ -217,7 +216,7 @@ class Multipole(InputElement, impactx_class="Multipole"):
     rotation: float = 0.0
 
 
-class ExactMultipole(_Aligned, impactx_class="ExactMultipole"):
+class ExactMultipole(_Aligned, impactx_class=elements.ExactMultipole):
     """A thick multipole using the exact nonlinear Hamiltonian.
 
     Attributes
@@ -247,7 +246,7 @@ class ExactMultipole(_Aligned, impactx_class="ExactMultipole"):
     mapsteps: int = 5
 
 
-class RFCavity(_Aligned, impactx_class="RFCavity"):
+class RFCavity(_Aligned, impactx_class=elements.RFCavity):
     """An RF cavity with an on-axis field given by a Fourier expansion.
 
     Attributes
@@ -282,7 +281,7 @@ class RFCavity(_Aligned, impactx_class="RFCavity"):
     mapsteps: int = 10
 
 
-class Kicker(InputElement, impactx_class="Kicker"):
+class Kicker(InputElement, impactx_class=elements.Kicker):
     """A thin transverse kicker.
 
     Attributes
@@ -304,7 +303,7 @@ class Kicker(InputElement, impactx_class="Kicker"):
     rotation: float = 0.0
 
 
-class Aperture(InputElement, impactx_class="Aperture"):
+class Aperture(InputElement, impactx_class=elements.Aperture):
     """A thin collimating aperture."""
 
     type: Literal["Aperture"] = "Aperture"
@@ -323,7 +322,7 @@ class Aperture(InputElement, impactx_class="Aperture"):
         return kwargs
 
 
-class Marker(InputElement, impactx_class="Marker"):
+class Marker(InputElement, impactx_class=elements.Marker):
     """A zero-length marker with no effect on the beam."""
 
     type: Literal["Marker"] = "Marker"
@@ -332,7 +331,7 @@ class Marker(InputElement, impactx_class="Marker"):
         return {"name": self.name or "marker"}
 
 
-class BeamMonitor(InputElement, impactx_class="BeamMonitor"):
+class BeamMonitor(InputElement, impactx_class=elements.BeamMonitor):
     """A zero-length diagnostic that writes the beam to openPMD.
 
     Attributes

@@ -12,11 +12,16 @@ Two products are read back:
 from __future__ import annotations
 
 import pathlib
+import warnings
 from collections.abc import Mapping
 from typing import Any
 
+import h5py
 import numpy as np
 from beamphysics import ParticleGroup
+from beamphysics.readers import particle_paths
+
+from .particles import impactx_monitor_to_particle_group
 
 
 def _find_reduced_file(workdir: pathlib.Path) -> pathlib.Path | None:
@@ -120,13 +125,6 @@ def _load_monitor_particle_groups(workdir: pathlib.Path) -> dict[str, ParticleGr
     momenta; :func:`impactx_monitor_to_particle_group` inverts this back to the
     lab-frame representation beamphysics uses.
     """
-    import warnings
-
-    import h5py
-    from beamphysics.readers import particle_paths
-
-    from .particles import impactx_monitor_to_particle_group
-
     diag_dir = workdir / "diags" / "openPMD"
     result: dict[str, ParticleGroup] = {}
     if not diag_dir.is_dir():

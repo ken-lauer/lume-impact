@@ -17,6 +17,7 @@ supply it; only the transverse coordinates coincide with Bmad's.
 
 from __future__ import annotations
 
+import amrex.space3d as amr
 import numpy as np
 from beamphysics import ParticleGroup
 from beamphysics.particles import c_light
@@ -32,8 +33,6 @@ def _to_podvector(arr):
     Newer ImpactX accepts numpy arrays for ``add_n_particles`` directly; older
     releases require an explicit PODVector.  This handles both.
     """
-    import amrex.space3d as amr
-
     arr = np.ascontiguousarray(np.asarray(arr, dtype=float))
     try:
         return amr.PODVector_real_std(arr)

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from beamphysics import ParticleGroup
 from beamphysics.species import charge_state, mass_of
+from impactx import ImpactX as _ImpactXSim
 
 from .input import ImpactXInput
 from .output import ImpactXOutput
@@ -81,8 +82,6 @@ def build_and_track(input: ImpactXInput, initial_particles: ParticleGroup | None
     Runs in the current working directory; diagnostics are written under
     ``./diags``.  The caller is responsible for the working directory.
     """
-    from impactx import ImpactX as _ImpactXSim
-
     sim = _ImpactXSim()
     # particle_shape must be set before init_grids for collective effects.
     sim.particle_shape = input.particle_shape
