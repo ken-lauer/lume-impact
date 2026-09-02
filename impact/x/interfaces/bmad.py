@@ -10,15 +10,17 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from beamphysics import ParticleGroup
 from beamphysics.particles import c_light
 from beamphysics.species import charge_state
 from pytao import Tao, TaoCommandError
-from typing_extensions import Literal
 
 from ...interfaces.bmad import ele_info
+
+# Reuse the generic (tool-agnostic) Tao helpers from the ImpactZ interface.
+from ...z.interfaces.bmad import export_particles, get_index_to_name
 from ..input import (
     AnyInputElement,
     BeamMonitor,
@@ -34,9 +36,6 @@ from ..input import (
     Sbend,
     Sol,
 )
-
-# Reuse the generic (tool-agnostic) Tao helpers from the ImpactZ interface.
-from ...z.interfaces.bmad import export_particles, get_index_to_name
 
 logger = logging.getLogger(__name__)
 
@@ -398,7 +397,7 @@ class ImpactXConversionState:
         ix_uni: int = 1,
         ix_branch: int = 0,
         which: Which = "model",
-    ) -> "ImpactXConversionState":
+    ) -> ImpactXConversionState:
         idx_to_name = get_index_to_name(
             tao,
             track_start=track_start,

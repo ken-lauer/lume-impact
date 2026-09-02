@@ -8,17 +8,16 @@ that object API; :meth:`InputElement.to_impactx` materializes the live element.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Union
+from typing import Any, ClassVar, Literal, TypeAlias
 
 import pydantic
 from impactx import elements
-from typing_extensions import Literal, TypeAlias
 
 from .constants import ApertureAction, ApertureShape, OpenPMDBackend
 from .types import BaseModel, PydanticParticleGroup
 
 # Registry of element models keyed by the upstream ImpactX class name.
-input_element_by_class: dict[str, type["InputElement"]] = {}
+input_element_by_class: dict[str, type[InputElement]] = {}
 
 
 class InputElement(BaseModel):
@@ -354,21 +353,21 @@ class BeamMonitor(InputElement, impactx_class=elements.BeamMonitor):
         }
 
 
-AnyInputElement: TypeAlias = Union[
-    Drift,
-    Quad,
-    Sbend,
-    CFbend,
-    Sol,
-    DipEdge,
-    Multipole,
-    ExactMultipole,
-    RFCavity,
-    Kicker,
-    Aperture,
-    Marker,
-    BeamMonitor,
-]
+AnyInputElement: TypeAlias = (
+    Drift
+    | Quad
+    | Sbend
+    | CFbend
+    | Sol
+    | DipEdge
+    | Multipole
+    | ExactMultipole
+    | RFCavity
+    | Kicker
+    | Aperture
+    | Marker
+    | BeamMonitor
+)
 
 
 class ImpactXInput(BaseModel):
@@ -430,7 +429,7 @@ class ImpactXInput(BaseModel):
         return [ele.to_impactx() for ele in self.lattice]
 
     @classmethod
-    def from_tao(cls, tao, **kwargs: Any) -> "ImpactXInput":
+    def from_tao(cls, tao, **kwargs: Any) -> ImpactXInput:
         """Create an :class:`ImpactXInput` from a live Tao instance's lattice.
 
         Parameters

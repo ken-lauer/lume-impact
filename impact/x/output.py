@@ -100,7 +100,7 @@ class ImpactXOutput:
         self.workdir = workdir
 
     @classmethod
-    def from_directory(cls, workdir: str | pathlib.Path) -> "ImpactXOutput":
+    def from_directory(cls, workdir: str | pathlib.Path) -> ImpactXOutput:
         workdir = pathlib.Path(workdir)
         reduced = _find_reduced_file(workdir)
         if reduced is None:

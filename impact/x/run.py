@@ -163,7 +163,7 @@ class ImpactX:
         self.path: pathlib.Path | None = None
 
     @classmethod
-    def from_tao(cls, tao: "Tao", **kwargs: Any) -> "ImpactX":
+    def from_tao(cls, tao: Tao, **kwargs: Any) -> ImpactX:
         """Create an :class:`ImpactX` from a live Tao instance's lattice.
 
         Keyword arguments are forwarded to :meth:`ImpactXInput.from_tao`.
